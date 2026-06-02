@@ -11,10 +11,10 @@ import (
 var ErrJobNotFound = errors.New("job not found")
 
 type ListFilter struct {
-	Status    *domain.JobStatus
-	Type      *string
-	CreatedTo *time.Time
-	CreatedAt *time.Time
+	Status      *domain.JobStatus
+	Type        *string
+	CreatedFrom *time.Time
+	CreatedTo   *time.Time
 }
 
 type Store interface {

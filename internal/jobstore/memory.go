@@ -51,7 +51,7 @@ func (s *MemoryStore) List(_ context.Context, filter ListFilter) ([]domain.Job, 
 		if filter.Type != nil && job.Type != *filter.Type {
 			continue
 		}
-		if filter.CreatedAt != nil && job.CreatedAt.Before(*filter.CreatedAt) {
+		if filter.CreatedFrom != nil && job.CreatedAt.Before(*filter.CreatedFrom) {
 			continue
 		}
 		if filter.CreatedTo != nil && job.CreatedAt.After(*filter.CreatedTo) {

@@ -162,13 +162,17 @@ func parseListFilter(w http.ResponseWriter, r *http.Request) (jobstore.ListFilte
 		filter.Type = &rawType
 	}
 
-	if rawCreatedAt := query.Get("created_at"); rawCreatedAt != "" {
-		createdAt, err := time.Parse(time.RFC3339, rawCreatedAt)
+	rawCreatedFrom := query.Get("created_from")
+	if rawCreatedFrom == "" {
+		rawCreatedFrom = query.Get("created_at")
+	}
+	if rawCreatedFrom != "" {
+		createdFrom, err := time.Parse(time.RFC3339, rawCreatedFrom)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "created_at must be RFC3339")
+			writeError(w, http.StatusBadRequest, "created_from must be RFC3339")
 			return jobstore.ListFilter{}, false
 		}
-		filter.CreatedAt = &createdAt
+		filter.CreatedFrom = &createdFrom
 	}
 
 	if rawCreatedTo := query.Get("created_to"); rawCreatedTo != "" {
