@@ -84,6 +84,15 @@ func NewJob(input NewJobInput, now time.Time) (Job, error) {
 	}, nil
 }
 
+func ParseJobStatus(value string) (JobStatus, bool) {
+	switch JobStatus(value) {
+	case JobStatusPending, JobStatusRunning, JobStatusCompleted, JobStatusFailed, JobStatusDeadLetter:
+		return JobStatus(value), true
+	default:
+		return "", false
+	}
+}
+
 func (j Job) IsEligible(now time.Time) bool {
 	return j.Status == JobStatusPending && !j.ExecuteAfter.After(now)
 }
