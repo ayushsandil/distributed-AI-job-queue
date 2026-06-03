@@ -39,3 +39,19 @@ func TestBuildListJobsQuery(t *testing.T) {
 		t.Fatalf("expected 4 args, got %d", len(args))
 	}
 }
+
+func TestClaimNextJobSQLUsesSkipLockedAndPriorityFIFO(t *testing.T) {
+	wantParts := []string{
+		"FOR UPDATE SKIP LOCKED",
+		"ORDER BY priority DESC, created_at ASC",
+		"status = 'PENDING'",
+		"execute_after <= $1",
+		"status = 'RUNNING'",
+	}
+
+	for _, part := range wantParts {
+		if !strings.Contains(claimNextJobSQL, part) {
+			t.Fatalf("expected claim SQL to contain %q, got %s", part, claimNextJobSQL)
+		}
+	}
+}

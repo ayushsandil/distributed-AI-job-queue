@@ -1,15 +1,13 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"ai-job-queue/internal/domain"
+	"ai-job-queue/internal/ids"
 	"ai-job-queue/internal/jobstore"
 )
 
@@ -84,7 +82,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 
 	now := s.now().UTC()
 	job, err := domain.NewJob(domain.NewJobInput{
-		ID:           newID(),
+		ID:           ids.NewUUID(),
 		Type:         req.Type,
 		Payload:      []byte(req.Payload),
 		Priority:     req.Priority,
@@ -217,17 +215,4 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
-}
-
-func newID() string {
-	var bytes [16]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 16)
-	}
-
-	bytes[6] = (bytes[6] & 0x0f) | 0x40
-	bytes[8] = (bytes[8] & 0x3f) | 0x80
-
-	encoded := hex.EncodeToString(bytes[:])
-	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
 }

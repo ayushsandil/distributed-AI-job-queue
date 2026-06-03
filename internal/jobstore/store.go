@@ -9,6 +9,8 @@ import (
 )
 
 var ErrJobNotFound = errors.New("job not found")
+var ErrNoJobAvailable = errors.New("no job available")
+var ErrExecutionNotFound = errors.New("execution not found")
 
 type ListFilter struct {
 	Status      *domain.JobStatus

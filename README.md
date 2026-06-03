@@ -63,3 +63,37 @@ go test ./internal/postgres -run Integration
 ```
 
 The integration test drops and recreates the project tables in the database named by `TEST_DATABASE_URL`, so point it at a disposable test database.
+
+## Step 4: Single Worker Processing
+
+The worker claims eligible jobs from PostgreSQL, records execution history, runs a registered handler, and completes or retries the job.
+
+Claiming uses PostgreSQL row-level locking:
+
+```sql
+FOR UPDATE SKIP LOCKED
+```
+
+Run a worker:
+
+```sh
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
+GOCACHE=/private/tmp/ai-job-queue-go-cache \
+go run ./cmd/worker
+```
+
+Useful worker environment variables:
+
+- `WORKER_ID`
+- `POLL_INTERVAL`, for example `500ms`
+- `LEASE_DURATION`, for example `1m`
+- `RETRY_INITIAL_DELAY`, for example `1s`
+- `RETRY_MAX_DELAY`, for example `1m`
+
+Built-in demo job types:
+
+- `noop`
+- `email.send`
+- `image.resize`
+- `sleep`, with payload such as `{"duration_ms":1000}`
+- `always.fail`
