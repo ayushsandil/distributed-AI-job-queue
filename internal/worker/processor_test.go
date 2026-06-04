@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,11 +92,84 @@ func TestProcessOneReturnsFalseWhenNoJobAvailable(t *testing.T) {
 	}
 }
 
+func TestMultipleWorkersProcessBatchWithoutDuplicates(t *testing.T) {
+	store := jobstore.NewMemoryStore()
+	now := time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	const jobCount = 100
+	const workerCount = 5
+
+	for i := 0; i < jobCount; i++ {
+		createWorkerTestJobWithID(t, store, fmt.Sprintf("00000000-0000-4000-8000-%012d", i+1), "tracked", now)
+	}
+
+	var mu sync.Mutex
+	processedByJob := make(map[string]int)
+	handlers := map[string]Handler{
+		"tracked": func(_ context.Context, job domain.Job) error {
+			mu.Lock()
+			defer mu.Unlock()
+			processedByJob[job.ID]++
+			return nil
+		},
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workerCount)
+	for i := 0; i < workerCount; i++ {
+		processor := newTestProcessorWithWorkerID(t, store, fmt.Sprintf("worker-%d", i+1), now, handlers)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				processed, err := processor.ProcessOne(ctx)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if !processed {
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("worker returned error: %v", err)
+	}
+
+	if len(processedByJob) != jobCount {
+		t.Fatalf("expected %d processed jobs, got %d", jobCount, len(processedByJob))
+	}
+	for jobID, count := range processedByJob {
+		if count != 1 {
+			t.Fatalf("expected job %s to be processed once, got %d", jobID, count)
+		}
+	}
+
+	status := domain.JobStatusCompleted
+	completedJobs, err := store.List(ctx, jobstore.ListFilter{Status: &status})
+	if err != nil {
+		t.Fatalf("list completed jobs: %v", err)
+	}
+	if len(completedJobs) != jobCount {
+		t.Fatalf("expected %d completed jobs, got %d", jobCount, len(completedJobs))
+	}
+}
+
 func createWorkerTestJob(t *testing.T, store *jobstore.MemoryStore, jobType string, now time.Time) domain.Job {
 	t.Helper()
 
+	return createWorkerTestJobWithID(t, store, "00000000-0000-4000-8000-000000000001", jobType, now)
+}
+
+func createWorkerTestJobWithID(t *testing.T, store *jobstore.MemoryStore, id string, jobType string, now time.Time) domain.Job {
+	t.Helper()
+
 	job, err := domain.NewJob(domain.NewJobInput{
-		ID:       "00000000-0000-4000-8000-000000000001",
+		ID:       id,
 		Type:     jobType,
 		Payload:  []byte(`{}`),
 		Priority: 1,
@@ -115,8 +190,14 @@ func createWorkerTestJob(t *testing.T, store *jobstore.MemoryStore, jobType stri
 func newTestProcessor(t *testing.T, store Store, now time.Time, handlers map[string]Handler) *Processor {
 	t.Helper()
 
+	return newTestProcessorWithWorkerID(t, store, "worker-1", now, handlers)
+}
+
+func newTestProcessorWithWorkerID(t *testing.T, store Store, workerID string, now time.Time, handlers map[string]Handler) *Processor {
+	t.Helper()
+
 	processor, err := NewProcessor(store, Config{
-		WorkerID:      "worker-1",
+		WorkerID:      workerID,
 		LeaseDuration: time.Minute,
 		RetryPolicy: domain.RetryPolicy{
 			InitialDelay: time.Second,

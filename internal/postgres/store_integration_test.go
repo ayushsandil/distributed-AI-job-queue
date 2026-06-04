@@ -3,12 +3,16 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"ai-job-queue/internal/domain"
 	"ai-job-queue/internal/jobstore"
+	"ai-job-queue/internal/worker"
 )
 
 func TestStoreIntegrationCreateGetList(t *testing.T) {
@@ -126,6 +130,122 @@ func TestStoreIntegrationClaimAndComplete(t *testing.T) {
 	}
 }
 
+func TestStoreIntegrationMultipleWorkersProcessBatchWithoutDuplicates(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+	db, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	resetTestDatabase(t, ctx, db)
+	if err := RunMigrations(ctx, db, "../../migrations"); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	store := NewStore(db)
+	now := time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC)
+	const jobCount = 50
+	const workerCount = 5
+
+	for i := 0; i < jobCount; i++ {
+		createIntegrationJob(t, ctx, store, fmt.Sprintf("00000000-0000-4000-8000-%012d", i+200), "tracked", now)
+	}
+
+	var mu sync.Mutex
+	processedByJob := make(map[string]int)
+	handlers := map[string]worker.Handler{
+		"tracked": func(_ context.Context, job domain.Job) error {
+			mu.Lock()
+			defer mu.Unlock()
+			processedByJob[job.ID]++
+			return nil
+		},
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workerCount)
+	for i := 0; i < workerCount; i++ {
+		processor, err := worker.NewProcessor(store, worker.Config{
+			WorkerID:      fmt.Sprintf("worker-%d", i+1),
+			LeaseDuration: time.Minute,
+			RetryPolicy: domain.RetryPolicy{
+				InitialDelay: time.Second,
+				MaxDelay:     time.Minute,
+			},
+			Handlers: handlers,
+			Now:      func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatalf("new processor: %v", err)
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				processed, err := processor.ProcessOne(ctx)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if !processed {
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("worker returned error: %v", err)
+	}
+
+	if len(processedByJob) != jobCount {
+		t.Fatalf("expected %d processed jobs, got %d", jobCount, len(processedByJob))
+	}
+	for jobID, count := range processedByJob {
+		if count != 1 {
+			t.Fatalf("expected job %s to be processed once, got %d", jobID, count)
+		}
+	}
+
+	completedCount := countRows(t, ctx, db, "SELECT COUNT(*) FROM jobs WHERE status = 'COMPLETED'")
+	if completedCount != jobCount {
+		t.Fatalf("expected %d completed jobs, got %d", jobCount, completedCount)
+	}
+
+	executionCount := countRows(t, ctx, db, "SELECT COUNT(*) FROM job_executions WHERE status = 'COMPLETED'")
+	if executionCount != jobCount {
+		t.Fatalf("expected %d completed executions, got %d", jobCount, executionCount)
+	}
+
+	duplicateSuccesses := countRows(t, ctx, db, `
+		SELECT COUNT(*)
+		FROM (
+			SELECT job_id
+			FROM job_executions
+			WHERE status = 'COMPLETED'
+			GROUP BY job_id
+			HAVING COUNT(*) > 1
+		) duplicate_jobs
+	`)
+	if duplicateSuccesses != 0 {
+		t.Fatalf("expected no duplicate completed executions, got %d", duplicateSuccesses)
+	}
+
+	_, err = store.ClaimNext(ctx, "late-worker", time.Minute, now)
+	if !errors.Is(err, jobstore.ErrNoJobAvailable) {
+		t.Fatalf("expected no remaining jobs, got %v", err)
+	}
+}
+
 func createIntegrationJob(t *testing.T, ctx context.Context, store *Store, id string, jobType string, now time.Time) domain.Job {
 	t.Helper()
 
@@ -148,6 +268,16 @@ func createIntegrationJob(t *testing.T, ctx context.Context, store *Store, id st
 	}
 
 	return created
+}
+
+func countRows(t *testing.T, ctx context.Context, db *sql.DB, query string) int {
+	t.Helper()
+
+	var count int
+	if err := db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	return count
 }
 
 func resetTestDatabase(t *testing.T, ctx context.Context, db *sql.DB) {

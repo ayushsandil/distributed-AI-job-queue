@@ -97,3 +97,20 @@ Built-in demo job types:
 - `image.resize`
 - `sleep`, with payload such as `{"duration_ms":1000}`
 - `always.fail`
+
+## Step 5: Multi-Worker Concurrency Tests
+
+The test suite now verifies that multiple workers can process a batch from a shared store without duplicate processing.
+
+Covered by fast unit tests:
+
+- several workers drain one shared in-memory queue
+- every job handler runs exactly once
+- every processed job reaches `COMPLETED`
+
+Covered by PostgreSQL integration tests when `TEST_DATABASE_URL` is set:
+
+- several workers drain one shared PostgreSQL queue
+- each job has exactly one completed execution
+- a late worker finds no remaining claimable jobs
+- the claim query uses `FOR UPDATE SKIP LOCKED`
