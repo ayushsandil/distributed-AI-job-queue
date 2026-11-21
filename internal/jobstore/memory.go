@@ -104,6 +104,40 @@ func (s *MemoryStore) ClaimNext(_ context.Context, workerID string, leaseDuratio
 	return *claimed, nil
 }
 
+func (s *MemoryStore) ReclaimExpired(_ context.Context, now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	reclaimed := 0
+	for jobID, job := range s.jobs {
+		if job.Status != domain.JobStatusRunning || job.LockExpiresAt == nil || job.LockExpiresAt.After(now) {
+			continue
+		}
+
+		job.Status = domain.JobStatusPending
+		job.LockedBy = nil
+		job.LockedAt = nil
+		job.LockExpiresAt = nil
+		job.UpdatedAt = now
+		s.jobs[jobID] = job
+		reclaimed++
+
+		for executionID, execution := range s.executions {
+			if execution.JobID != jobID || execution.Status != domain.ExecutionStatusRunning {
+				continue
+			}
+
+			errorMessage := LeaseExpiredError
+			execution.Status = domain.ExecutionStatusFailed
+			execution.EndedAt = &now
+			execution.ErrorMessage = &errorMessage
+			s.executions[executionID] = execution
+		}
+	}
+
+	return reclaimed, nil
+}
+
 func (s *MemoryStore) CreateExecution(_ context.Context, execution domain.JobExecution) (domain.JobExecution, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

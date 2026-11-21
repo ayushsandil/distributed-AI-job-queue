@@ -93,10 +93,12 @@ Useful worker environment variables:
 Built-in demo job types:
 
 - `noop`
-- `email.send`
-- `image.resize`
+- `email.send`, currently a successful placeholder handler
+- `image.resize`, currently a successful placeholder handler
 - `sleep`, with payload such as `{"duration_ms":1000}`
 - `always.fail`
+
+These are queue-level job types, not full integrations yet. A real email sender, image processor, or other application-specific handler can be registered by the worker process later.
 
 ## Step 5: Multi-Worker Concurrency Tests
 
@@ -114,3 +116,9 @@ Covered by PostgreSQL integration tests when `TEST_DATABASE_URL` is set:
 - each job has exactly one completed execution
 - a late worker finds no remaining claimable jobs
 - the claim query uses `FOR UPDATE SKIP LOCKED`
+
+## Step 6: Crash Recovery
+
+Workers use a lease for each claimed job. At the start of each polling cycle, expired `RUNNING` jobs are returned to `PENDING`, their lock fields are cleared, and any still-running execution record is marked failed with `worker lease expired`.
+
+This gives the queue at-least-once processing behavior. If a worker crashes after performing external work but before recording completion, the job may run again, so real handlers should be idempotent.

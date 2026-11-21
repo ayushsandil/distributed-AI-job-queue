@@ -131,6 +131,66 @@ func (s *Store) ClaimNext(ctx context.Context, workerID string, leaseDuration ti
 	return job, nil
 }
 
+func (s *Store) ReclaimExpired(ctx context.Context, now time.Time) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin reclaim expired jobs: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE job_executions
+		SET status = $2,
+			ended_at = $1,
+			error_message = $3
+		WHERE status = $4
+			AND job_id IN (
+				SELECT id
+				FROM jobs
+				WHERE status = $5
+					AND lock_expires_at IS NOT NULL
+					AND lock_expires_at <= $1
+			)
+	`, now,
+		string(domain.ExecutionStatusFailed),
+		jobstore.LeaseExpiredError,
+		string(domain.ExecutionStatusRunning),
+		string(domain.JobStatusRunning),
+	); err != nil {
+		return 0, fmt.Errorf("fail expired executions: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = $2,
+			locked_by = NULL,
+			locked_at = NULL,
+			lock_expires_at = NULL,
+			updated_at = $1
+		WHERE status = $3
+			AND lock_expires_at IS NOT NULL
+			AND lock_expires_at <= $1
+	`, now,
+		string(domain.JobStatusPending),
+		string(domain.JobStatusRunning),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim expired jobs: %w", err)
+	}
+
+	reclaimed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count reclaimed jobs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit reclaimed jobs: %w", err)
+	}
+
+	return int(reclaimed), nil
+}
+
 func (s *Store) CreateExecution(ctx context.Context, execution domain.JobExecution) (domain.JobExecution, error) {
 	const query = `
 		INSERT INTO job_executions (

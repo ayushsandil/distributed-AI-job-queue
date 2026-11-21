@@ -12,6 +12,8 @@ var ErrJobNotFound = errors.New("job not found")
 var ErrNoJobAvailable = errors.New("no job available")
 var ErrExecutionNotFound = errors.New("execution not found")
 
+const LeaseExpiredError = "worker lease expired"
+
 type ListFilter struct {
 	Status      *domain.JobStatus
 	Type        *string

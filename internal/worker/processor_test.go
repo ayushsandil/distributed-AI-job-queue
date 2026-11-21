@@ -92,6 +92,74 @@ func TestProcessOneReturnsFalseWhenNoJobAvailable(t *testing.T) {
 	}
 }
 
+func TestExpiredLeaseIsReclaimedAndCanBeProcessedByAnotherWorker(t *testing.T) {
+	store := jobstore.NewMemoryStore()
+	claimedAt := time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC)
+	recoveryAt := claimedAt.Add(2 * time.Minute)
+	job := createWorkerTestJob(t, store, "tracked", claimedAt)
+
+	claimed, err := store.ClaimNext(context.Background(), "crashed-worker", time.Minute, claimedAt)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if claimed.ID != job.ID {
+		t.Fatalf("expected claimed job %s, got %s", job.ID, claimed.ID)
+	}
+
+	execution, err := store.CreateExecution(context.Background(), domain.JobExecution{
+		ID:        "00000000-0000-4000-8000-000000000099",
+		JobID:     job.ID,
+		WorkerID:  "crashed-worker",
+		StartedAt: claimedAt,
+		Status:    domain.ExecutionStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("create execution: %v", err)
+	}
+
+	reclaimed, err := store.ReclaimExpired(context.Background(), recoveryAt)
+	if err != nil {
+		t.Fatalf("reclaim expired job: %v", err)
+	}
+	if reclaimed != 1 {
+		t.Fatalf("expected 1 reclaimed job, got %d", reclaimed)
+	}
+
+	requeued, err := store.GetByID(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get requeued job: %v", err)
+	}
+	if requeued.Status != domain.JobStatusPending {
+		t.Fatalf("expected requeued job to be pending, got %s", requeued.Status)
+	}
+	if requeued.LockedBy != nil || requeued.LockedAt != nil || requeued.LockExpiresAt != nil {
+		t.Fatalf("expected expired lease fields to be cleared")
+	}
+
+	processor := newTestProcessorWithWorkerID(t, store, "recovery-worker", recoveryAt, map[string]Handler{
+		"tracked": func(context.Context, domain.Job) error { return nil },
+	})
+	processed, err := processor.ProcessOne(context.Background())
+	if err != nil {
+		t.Fatalf("process recovered job: %v", err)
+	}
+	if !processed {
+		t.Fatalf("expected recovery worker to process requeued job")
+	}
+
+	completed, err := store.GetByID(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("get completed job: %v", err)
+	}
+	if completed.Status != domain.JobStatusCompleted {
+		t.Fatalf("expected recovered job to complete, got %s", completed.Status)
+	}
+
+	if execution.ID == "" {
+		t.Fatalf("expected execution to be recorded")
+	}
+}
+
 func TestMultipleWorkersProcessBatchWithoutDuplicates(t *testing.T) {
 	store := jobstore.NewMemoryStore()
 	now := time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC)

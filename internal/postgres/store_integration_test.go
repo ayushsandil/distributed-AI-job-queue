@@ -246,6 +246,67 @@ func TestStoreIntegrationMultipleWorkersProcessBatchWithoutDuplicates(t *testing
 	}
 }
 
+func TestStoreIntegrationReclaimsExpiredLease(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+
+	ctx := context.Background()
+	db, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	resetTestDatabase(t, ctx, db)
+	if err := RunMigrations(ctx, db, "../../migrations"); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	store := NewStore(db)
+	claimedAt := time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC)
+	recoveryAt := claimedAt.Add(2 * time.Minute)
+	job := createIntegrationJob(t, ctx, store, "00000000-0000-4000-8000-000000000300", "noop", claimedAt)
+
+	claimed, err := store.ClaimNext(ctx, "crashed-worker", time.Minute, claimedAt)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+
+	_, err = store.CreateExecution(ctx, domain.JobExecution{
+		ID:        "00000000-0000-4000-8000-000000000301",
+		JobID:     claimed.ID,
+		WorkerID:  "crashed-worker",
+		StartedAt: claimedAt,
+		Status:    domain.ExecutionStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("create execution: %v", err)
+	}
+
+	reclaimed, err := store.ReclaimExpired(ctx, recoveryAt)
+	if err != nil {
+		t.Fatalf("reclaim expired job: %v", err)
+	}
+	if reclaimed != 1 {
+		t.Fatalf("expected 1 reclaimed job, got %d", reclaimed)
+	}
+
+	requeued, err := store.GetByID(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get requeued job: %v", err)
+	}
+	if requeued.Status != domain.JobStatusPending || requeued.LockedBy != nil {
+		t.Fatalf("expected unlocked pending job, got %+v", requeued)
+	}
+
+	failedExecutions := countRows(t, ctx, db, "SELECT COUNT(*) FROM job_executions WHERE status = 'FAILED' AND error_message = 'worker lease expired'")
+	if failedExecutions != 1 {
+		t.Fatalf("expected 1 failed expired execution, got %d", failedExecutions)
+	}
+}
+
 func createIntegrationJob(t *testing.T, ctx context.Context, store *Store, id string, jobType string, now time.Time) domain.Job {
 	t.Helper()
 

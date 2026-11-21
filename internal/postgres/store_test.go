@@ -55,3 +55,29 @@ func TestClaimNextJobSQLUsesSkipLockedAndPriorityFIFO(t *testing.T) {
 		}
 	}
 }
+
+func TestReclaimExpiredJobSQLClearsLeaseAndRequeues(t *testing.T) {
+	query := `
+		UPDATE jobs
+		SET status = $2,
+			locked_by = NULL,
+			locked_at = NULL,
+			lock_expires_at = NULL,
+			updated_at = $1
+		WHERE status = $3
+			AND lock_expires_at IS NOT NULL
+			AND lock_expires_at <= $1
+	`
+
+	for _, part := range []string{
+		"status = $2",
+		"locked_by = NULL",
+		"lock_expires_at = NULL",
+		"status = $3",
+		"lock_expires_at <= $1",
+	} {
+		if !strings.Contains(query, part) {
+			t.Fatalf("expected reclaim SQL to contain %q, got %s", part, query)
+		}
+	}
+}

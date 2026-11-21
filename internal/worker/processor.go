@@ -15,6 +15,7 @@ type Handler func(ctx context.Context, job domain.Job) error
 
 type Store interface {
 	ClaimNext(ctx context.Context, workerID string, leaseDuration time.Duration, now time.Time) (domain.Job, error)
+	ReclaimExpired(ctx context.Context, now time.Time) (int, error)
 	CreateExecution(ctx context.Context, execution domain.JobExecution) (domain.JobExecution, error)
 	CompleteExecution(ctx context.Context, executionID string, endedAt time.Time) error
 	FailExecution(ctx context.Context, executionID string, endedAt time.Time, errorMessage string) error
@@ -126,6 +127,10 @@ func (p *Processor) Run(ctx context.Context, pollInterval time.Duration) error {
 	}
 
 	for {
+		if _, err := p.store.ReclaimExpired(ctx, p.now().UTC()); err != nil {
+			return err
+		}
+
 		processed, err := p.ProcessOne(ctx)
 		if err != nil {
 			return err
