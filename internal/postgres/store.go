@@ -131,6 +131,37 @@ func (s *Store) ClaimNext(ctx context.Context, workerID string, leaseDuration ti
 	return job, nil
 }
 
+func (s *Store) StartJob(ctx context.Context, jobID, workerID string, leaseDuration time.Duration, now time.Time) (domain.Job, error) {
+	row := s.db.QueryRowContext(ctx, `
+		UPDATE jobs
+		SET status = $2,
+			locked_by = $3,
+			locked_at = $4,
+			lock_expires_at = $5,
+			updated_at = $4
+		WHERE id = $1
+			AND status = $6
+			AND execute_after <= $4
+		RETURNING `+jobColumns,
+		jobID,
+		string(domain.JobStatusRunning),
+		workerID,
+		now,
+		now.Add(leaseDuration),
+		string(domain.JobStatusPending),
+	)
+
+	job, err := scanJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Job{}, jobstore.ErrJobNotClaimable
+	}
+	if err != nil {
+		return domain.Job{}, fmt.Errorf("start job: %w", err)
+	}
+
+	return job, nil
+}
+
 func (s *Store) ReclaimExpired(ctx context.Context, now time.Time) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

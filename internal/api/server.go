@@ -12,16 +12,20 @@ import (
 )
 
 type Server struct {
-	store jobstore.Store
-	now   func() time.Time
-	mux   *http.ServeMux
+	store     jobstore.Store
+	publisher jobstore.Publisher
+	now       func() time.Time
+	mux       *http.ServeMux
 }
 
-func NewServer(store jobstore.Store) *Server {
+func NewServer(store jobstore.Store, publishers ...jobstore.Publisher) *Server {
 	server := &Server{
 		store: store,
 		now:   time.Now,
 		mux:   http.NewServeMux(),
+	}
+	if len(publishers) > 0 {
+		server.publisher = publishers[0]
 	}
 	server.routes()
 	return server
@@ -100,6 +104,12 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create job")
 		return
+	}
+	if s.publisher != nil {
+		if err := s.publisher.Publish(r.Context(), created); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "job persisted but could not be queued")
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, toJobResponse(created, true))

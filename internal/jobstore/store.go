@@ -9,6 +9,7 @@ import (
 )
 
 var ErrJobNotFound = errors.New("job not found")
+var ErrJobNotClaimable = errors.New("job is not claimable")
 var ErrNoJobAvailable = errors.New("no job available")
 var ErrExecutionNotFound = errors.New("execution not found")
 
@@ -25,4 +26,8 @@ type Store interface {
 	Create(ctx context.Context, job domain.Job) (domain.Job, error)
 	GetByID(ctx context.Context, id string) (domain.Job, error)
 	List(ctx context.Context, filter ListFilter) ([]domain.Job, error)
+}
+
+type Publisher interface {
+	Publish(ctx context.Context, job domain.Job) error
 }

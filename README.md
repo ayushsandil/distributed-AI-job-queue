@@ -122,3 +122,39 @@ Covered by PostgreSQL integration tests when `TEST_DATABASE_URL` is set:
 Workers use a lease for each claimed job. At the start of each polling cycle, expired `RUNNING` jobs are returned to `PENDING`, their lock fields are cleared, and any still-running execution record is marked failed with `worker lease expired`.
 
 This gives the queue at-least-once processing behavior. If a worker crashes after performing external work but before recording completion, the job may run again, so real handlers should be idempotent.
+
+## Step 7: Redis Streams
+
+Redis Streams are available as an alternate queue transport. PostgreSQL remains the durable source for job metadata and execution history.
+
+Run the API in Redis mode:
+
+```sh
+QUEUE_BACKEND=redis \
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
+REDIS_URL='redis://localhost:6379/0' \
+GOCACHE=/private/tmp/ai-job-queue-go-cache \
+go run ./cmd/api
+```
+
+Run a Redis Stream worker:
+
+```sh
+QUEUE_BACKEND=redis \
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
+REDIS_URL='redis://localhost:6379/0' \
+GOCACHE=/private/tmp/ai-job-queue-go-cache \
+go run ./cmd/worker
+```
+
+The Redis worker uses `XREADGROUP` for work distribution, `XACK` after successful state updates, and `XAUTOCLAIM` to recover messages left pending by crashed workers. Configure `REDIS_STREAM`, `REDIS_GROUP`, and `STREAM_BATCH_SIZE` when needed.
+
+The first Redis transport preserves enqueue order, not PostgreSQL priority ordering. It also waits for a future `execute_after` value inside the worker. Priority lanes and a separate delayed-job scheduler are natural follow-up improvements.
+
+Redis integration tests use:
+
+```sh
+TEST_REDIS_URL='redis://localhost:6379/0' \
+GOCACHE=/private/tmp/ai-job-queue-go-cache \
+go test ./internal/redisqueue -run Integration -v
+```

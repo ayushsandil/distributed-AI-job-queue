@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"ai-job-queue/internal/domain"
 	"ai-job-queue/internal/jobstore"
 )
 
@@ -35,6 +38,35 @@ func TestCreateJob(t *testing.T) {
 	}
 	if response.RetryCount != 0 || response.MaxRetries != 3 {
 		t.Fatalf("unexpected retry fields: count=%d max=%d", response.RetryCount, response.MaxRetries)
+	}
+}
+
+func TestCreateJobPublishesWhenPublisherConfigured(t *testing.T) {
+	var publishedID string
+	publisher := publisherFunc(func(_ context.Context, job domain.Job) error {
+		publishedID = job.ID
+		return nil
+	})
+	server := NewServer(jobstore.NewMemoryStore(), publisher)
+
+	response := createJobForTest(t, server, `{"type":"noop","payload":{}}`)
+	if publishedID != response.ID {
+		t.Fatalf("expected publisher to receive job %s, got %s", response.ID, publishedID)
+	}
+}
+
+func TestCreateJobReturnsUnavailableWhenPublishingFails(t *testing.T) {
+	publisher := publisherFunc(func(context.Context, domain.Job) error {
+		return errors.New("redis unavailable")
+	})
+	server := NewServer(jobstore.NewMemoryStore(), publisher)
+	req := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(`{"type":"noop"}`))
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -166,4 +198,10 @@ func createJobForTest(t *testing.T, server *Server, body string) jobResponse {
 	}
 
 	return response
+}
+
+type publisherFunc func(context.Context, domain.Job) error
+
+func (f publisherFunc) Publish(ctx context.Context, job domain.Job) error {
+	return f(ctx, job)
 }
