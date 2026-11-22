@@ -2,6 +2,92 @@
 
 Personal distributed job queue project built in small, testable slices.
 
+## Prerequisites
+
+- Go 1.26 or newer
+- Docker Desktop with Docker Compose
+- Ports `5432`, `6379`, and `8080` available locally
+
+## Quick Start
+
+Start PostgreSQL and Redis from the project root:
+
+```sh
+docker compose up -d
+docker compose ps
+```
+
+Compose exposes PostgreSQL on `localhost:5432`, Redis on `localhost:6379`, and creates the disposable `ai_job_queue_test` database used by the integration tests.
+
+Run the complete test suite:
+
+```sh
+go test ./...
+```
+
+Run the real PostgreSQL and Redis integration tests:
+
+```sh
+TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue_test?sslmode=disable' \
+TEST_REDIS_URL='redis://localhost:6379/0' \
+go test ./internal/postgres ./internal/redisqueue -run Integration -v
+```
+
+Start the API in Redis Stream mode in one terminal:
+
+```sh
+QUEUE_BACKEND=redis \
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
+REDIS_URL='redis://localhost:6379/0' \
+go run ./cmd/api
+```
+
+Start a worker in a second terminal:
+
+```sh
+QUEUE_BACKEND=redis \
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
+REDIS_URL='redis://localhost:6379/0' \
+WORKER_ID=worker-1 \
+go run ./cmd/worker
+```
+
+Submit a sample job from a third terminal:
+
+```sh
+curl -X POST http://localhost:8080/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"noop","payload":{"source":"manual-smoke-test"},"priority":5,"max_retries":2}'
+```
+
+Copy the returned `id`, then query its status:
+
+```sh
+curl http://localhost:8080/jobs/<job-id>
+```
+
+The expected lifecycle is:
+
+```text
+PENDING -> RUNNING -> COMPLETED
+```
+
+Stop the local infrastructure when finished:
+
+```sh
+docker compose down
+```
+
+Use `docker compose down -v` only when you want to delete the local PostgreSQL and Redis volumes.
+
+## Architecture
+
+PostgreSQL is the durable source for job metadata and execution history. Redis Streams are an alternate transport for distributing work between workers.
+
+The default worker uses PostgreSQL row-level locking. Redis mode uses a consumer group with `XREADGROUP`, acknowledges completed messages with `XACK`, and recovers stale pending messages with `XAUTOCLAIM`.
+
+Redis mode currently preserves enqueue order rather than PostgreSQL priority ordering. Delayed jobs are held by the worker until `execute_after`; priority lanes and a dedicated delayed-job scheduler are planned improvements.
+
 ## Step 1: Core Model
 
 This first slice defines the job lifecycle, retry policy, execution history model, and PostgreSQL migrations.
@@ -32,7 +118,6 @@ The API runs SQL migrations on startup by default:
 
 ```sh
 DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
-GOCACHE=/private/tmp/ai-job-queue-go-cache \
 go run ./cmd/api
 ```
 
@@ -45,20 +130,19 @@ RUN_MIGRATIONS=false go run ./cmd/api
 Run the API:
 
 ```sh
-GOCACHE=/private/tmp/ai-job-queue-go-cache go run ./cmd/api
+go run ./cmd/api
 ```
 
 Run tests:
 
 ```sh
-GOCACHE=/private/tmp/ai-job-queue-go-cache go test ./...
+go test ./...
 ```
 
 Run PostgreSQL integration tests:
 
 ```sh
 TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue_test?sslmode=disable' \
-GOCACHE=/private/tmp/ai-job-queue-go-cache \
 go test ./internal/postgres -run Integration
 ```
 
@@ -78,7 +162,6 @@ Run a worker:
 
 ```sh
 DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
-GOCACHE=/private/tmp/ai-job-queue-go-cache \
 go run ./cmd/worker
 ```
 
@@ -133,7 +216,6 @@ Run the API in Redis mode:
 QUEUE_BACKEND=redis \
 DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
 REDIS_URL='redis://localhost:6379/0' \
-GOCACHE=/private/tmp/ai-job-queue-go-cache \
 go run ./cmd/api
 ```
 
@@ -143,7 +225,6 @@ Run a Redis Stream worker:
 QUEUE_BACKEND=redis \
 DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
 REDIS_URL='redis://localhost:6379/0' \
-GOCACHE=/private/tmp/ai-job-queue-go-cache \
 go run ./cmd/worker
 ```
 
@@ -155,6 +236,5 @@ Redis integration tests use:
 
 ```sh
 TEST_REDIS_URL='redis://localhost:6379/0' \
-GOCACHE=/private/tmp/ai-job-queue-go-cache \
 go test ./internal/redisqueue -run Integration -v
 ```
