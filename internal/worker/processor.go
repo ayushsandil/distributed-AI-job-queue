@@ -13,31 +13,59 @@ import (
 
 type Handler func(ctx context.Context, job domain.Job) error
 
+type HandlerResult struct {
+	Result []byte
+}
+
+type ResultHandler func(ctx context.Context, job domain.Job) (HandlerResult, error)
+
+type permanentError struct {
+	err error
+}
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentError{err: err}
+}
+
+func isPermanent(err error) bool {
+	var target *permanentError
+	return errors.As(err, &target)
+}
+
 type Store interface {
 	ClaimNext(ctx context.Context, workerID string, leaseDuration time.Duration, now time.Time) (domain.Job, error)
 	ReclaimExpired(ctx context.Context, now time.Time) (int, error)
 	CreateExecution(ctx context.Context, execution domain.JobExecution) (domain.JobExecution, error)
 	CompleteExecution(ctx context.Context, executionID string, endedAt time.Time) error
 	FailExecution(ctx context.Context, executionID string, endedAt time.Time, errorMessage string) error
-	CompleteJob(ctx context.Context, jobID string, now time.Time) (domain.Job, error)
+	CompleteJob(ctx context.Context, jobID string, result []byte, now time.Time) (domain.Job, error)
 	FailJob(ctx context.Context, jobID string, errorMessage string, policy domain.RetryPolicy, now time.Time) (domain.Job, error)
+	FailJobPermanently(ctx context.Context, jobID string, errorMessage string, now time.Time) (domain.Job, error)
 }
 
 type Config struct {
-	WorkerID      string
-	LeaseDuration time.Duration
-	RetryPolicy   domain.RetryPolicy
-	Handlers      map[string]Handler
-	Now           func() time.Time
+	WorkerID       string
+	LeaseDuration  time.Duration
+	RetryPolicy    domain.RetryPolicy
+	Handlers       map[string]Handler
+	ResultHandlers map[string]ResultHandler
+	Now            func() time.Time
 }
 
 type Processor struct {
-	store         Store
-	workerID      string
-	leaseDuration time.Duration
-	retryPolicy   domain.RetryPolicy
-	handlers      map[string]Handler
-	now           func() time.Time
+	store          Store
+	workerID       string
+	leaseDuration  time.Duration
+	retryPolicy    domain.RetryPolicy
+	handlers       map[string]Handler
+	resultHandlers map[string]ResultHandler
+	now            func() time.Time
 }
 
 func NewProcessor(store Store, config Config) (*Processor, error) {
@@ -56,17 +84,21 @@ func NewProcessor(store Store, config Config) (*Processor, error) {
 	if config.Handlers == nil {
 		config.Handlers = BuiltInHandlers()
 	}
+	if config.ResultHandlers == nil {
+		config.ResultHandlers = make(map[string]ResultHandler)
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
 
 	return &Processor{
-		store:         store,
-		workerID:      config.WorkerID,
-		leaseDuration: config.LeaseDuration,
-		retryPolicy:   config.RetryPolicy,
-		handlers:      config.Handlers,
-		now:           config.Now,
+		store:          store,
+		workerID:       config.WorkerID,
+		leaseDuration:  config.LeaseDuration,
+		retryPolicy:    config.RetryPolicy,
+		handlers:       config.Handlers,
+		resultHandlers: config.ResultHandlers,
+		now:            config.Now,
 	}, nil
 }
 
@@ -92,11 +124,13 @@ func (p *Processor) ProcessOne(ctx context.Context) (bool, error) {
 		return true, err
 	}
 
-	handler, ok := p.handlers[job.Type]
-	if !ok {
-		err = fmt.Errorf("no handler registered for job type %q", job.Type)
-	} else {
+	var handlerResult HandlerResult
+	if resultHandler, ok := p.resultHandlers[job.Type]; ok {
+		handlerResult, err = resultHandler(ctx, job)
+	} else if handler, ok := p.handlers[job.Type]; ok {
 		err = handler(ctx, job)
+	} else {
+		err = Permanent(fmt.Errorf("no handler registered for job type %q", job.Type))
 	}
 
 	endedAt := p.now().UTC()
@@ -105,7 +139,13 @@ func (p *Processor) ProcessOne(ctx context.Context) (bool, error) {
 		if markErr := p.store.FailExecution(ctx, createdExecution.ID, endedAt, errorMessage); markErr != nil {
 			return true, markErr
 		}
-		if _, failErr := p.store.FailJob(ctx, job.ID, errorMessage, p.retryPolicy, endedAt); failErr != nil {
+		var failErr error
+		if isPermanent(err) {
+			_, failErr = p.store.FailJobPermanently(ctx, job.ID, errorMessage, endedAt)
+		} else {
+			_, failErr = p.store.FailJob(ctx, job.ID, errorMessage, p.retryPolicy, endedAt)
+		}
+		if failErr != nil {
 			return true, failErr
 		}
 		return true, nil
@@ -114,7 +154,7 @@ func (p *Processor) ProcessOne(ctx context.Context) (bool, error) {
 	if err := p.store.CompleteExecution(ctx, createdExecution.ID, endedAt); err != nil {
 		return true, err
 	}
-	if _, err := p.store.CompleteJob(ctx, job.ID, endedAt); err != nil {
+	if _, err := p.store.CompleteJob(ctx, job.ID, handlerResult.Result, endedAt); err != nil {
 		return true, err
 	}
 

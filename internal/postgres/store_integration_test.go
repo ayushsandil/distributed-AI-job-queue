@@ -121,7 +121,7 @@ func TestStoreIntegrationClaimAndComplete(t *testing.T) {
 		t.Fatalf("complete execution: %v", err)
 	}
 
-	completed, err := store.CompleteJob(ctx, job.ID, now.Add(time.Second))
+	completed, err := store.CompleteJob(ctx, job.ID, nil, now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("complete job: %v", err)
 	}

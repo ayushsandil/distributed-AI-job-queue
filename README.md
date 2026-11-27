@@ -72,6 +72,81 @@ The expected lifecycle is:
 PENDING -> RUNNING -> COMPLETED
 ```
 
+### Run an AI text job
+
+The worker supports `ai.text.generate` through the OpenAI Responses API. Keep the key in your shell environment or a local ignored file. Do not put the key in job payloads, source files, README examples, or Git.
+
+Set it without placing the value in shell history:
+
+```sh
+read -s OPENAI_API_KEY
+export OPENAI_API_KEY
+```
+
+Start the Redis-mode worker with the same environment as the API:
+
+```sh
+QUEUE_BACKEND=redis \
+DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue?sslmode=disable' \
+REDIS_URL='redis://localhost:6379/0' \
+OPENAI_MODEL='gpt-4o-mini' \
+WORKER_ID=ai-worker-1 \
+go run ./cmd/worker
+```
+
+Submit an AI job:
+
+```sh
+curl -X POST http://localhost:8080/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"ai.text.generate","payload":{"prompt":"Give me three concise names for a distributed job queue.","max_output_tokens":80,"temperature":0.2},"max_retries":2}'
+```
+
+When the job completes, `GET /jobs/<job-id>` includes the generated text and token usage in `result`. The result is stored in PostgreSQL with the job record.
+
+AI jobs use the normal queue retry lifecycle. Provider timeouts, rate limits, and server errors are retryable; invalid payloads and non-retryable provider errors go directly to `DEAD_LETTER`.
+
+The AI job path is wired end to end across the API, Redis consumer group, worker handler, OpenAI provider boundary, PostgreSQL result persistence, and final job-status lookup. Successful result persistence is covered by fake-provider worker tests; live completion requires an API project with model access and available API credits.
+
+## AI implementation
+
+The AI integration is intentionally isolated from the queue core:
+
+- `internal/ai` defines the provider contract and the OpenAI Responses API client.
+- `internal/worker/ai_handler.go` validates `ai.text.generate` payloads and converts provider responses into a persisted result.
+- The worker selects the OpenAI provider from environment variables and never receives an API key in a job payload.
+- Successful results are stored in the PostgreSQL `jobs.result` JSONB column.
+- Results include generated text, provider, model, response ID, and input/output/total token counts.
+
+AI unit and component tests cover:
+
+- OpenAI request authentication and request-body construction
+- Responses API output and usage parsing
+- Retry classification for rate limits and server errors
+- Permanent classification for invalid requests
+- Fake-provider handler execution
+- Result persistence through the worker
+
+Run the AI-focused tests:
+
+```sh
+go test ./internal/ai ./internal/worker -v
+```
+
+Run the real PostgreSQL and Redis integration tests:
+
+```sh
+TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/ai_job_queue_test?sslmode=disable' \
+TEST_REDIS_URL='redis://localhost:6379/0' \
+go test ./internal/postgres ./internal/redisqueue -run Integration -v
+```
+
+The normal test suite uses fake providers and an in-memory HTTP transport, so it never sends requests to OpenAI:
+
+```sh
+go test ./...
+```
+
 Stop the local infrastructure when finished:
 
 ```sh
@@ -231,6 +306,26 @@ go run ./cmd/worker
 The Redis worker uses `XREADGROUP` for work distribution, `XACK` after successful state updates, and `XAUTOCLAIM` to recover messages left pending by crashed workers. Configure `REDIS_STREAM`, `REDIS_GROUP`, and `STREAM_BATCH_SIZE` when needed.
 
 The first Redis transport preserves enqueue order, not PostgreSQL priority ordering. It also waits for a future `execute_after` value inside the worker. Priority lanes and a separate delayed-job scheduler are natural follow-up improvements.
+
+## OpenAI configuration
+
+The worker reads these environment variables:
+
+- `OPENAI_API_KEY`, required to execute `ai.text.generate`
+- `OPENAI_BASE_URL`, optional and defaults to `https://api.openai.com/v1`
+- `OPENAI_MODEL`, optional and defaults to `gpt-4o-mini`
+- `AI_REQUEST_TIMEOUT`, optional Go duration and defaults to `2m`
+
+`.env` files and key-like files are ignored by Git. Before pushing, verify that no secret is tracked:
+
+```sh
+git ls-files | rg '(^|/)(\.env|.*\.key|.*\.secret)(\.|$)' || true
+git diff --check
+```
+
+If an API key was ever committed, rotate it immediately in the OpenAI dashboard; adding it to `.gitignore` does not remove it from Git history.
+
+ChatGPT usage and API billing are separate. Free API credits are only available when the API account or an eligible promotion provides them; check the API project billing page before running live jobs. [OpenAI billing guidance](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform)
 
 Redis integration tests use:
 

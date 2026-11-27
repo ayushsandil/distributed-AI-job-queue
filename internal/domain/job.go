@@ -31,6 +31,7 @@ type Job struct {
 	ID            string
 	Type          string
 	Payload       []byte
+	Result        []byte
 	Priority      int
 	Status        JobStatus
 	RetryCount    int

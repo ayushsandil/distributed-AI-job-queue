@@ -54,6 +54,7 @@ type jobResponse struct {
 	ID           string          `json:"id"`
 	Type         string          `json:"type"`
 	Payload      json.RawMessage `json:"payload,omitempty"`
+	Result       json.RawMessage `json:"result,omitempty"`
 	Priority     int             `json:"priority"`
 	Status       string          `json:"status"`
 	RetryCount   int             `json:"retry_count"`
@@ -212,6 +213,9 @@ func toJobResponse(job domain.Job, includePayload bool) jobResponse {
 
 	if includePayload {
 		response.Payload = json.RawMessage(job.Payload)
+		if len(job.Result) > 0 {
+			response.Result = json.RawMessage(job.Result)
+		}
 	}
 
 	return response

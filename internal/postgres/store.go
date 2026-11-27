@@ -26,6 +26,7 @@ func (s *Store) Create(ctx context.Context, job domain.Job) (domain.Job, error) 
 			id,
 			type,
 			payload,
+			result,
 			priority,
 			status,
 			retry_count,
@@ -40,7 +41,7 @@ func (s *Store) Create(ctx context.Context, job domain.Job) (domain.Job, error) 
 			updated_at
 		)
 		VALUES (
-			$1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+			$1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
 		)
 		RETURNING ` + jobColumns
 
@@ -53,6 +54,7 @@ func (s *Store) Create(ctx context.Context, job domain.Job) (domain.Job, error) 
 		job.ID,
 		job.Type,
 		string(payload),
+		jsonValue(job.Result),
 		job.Priority,
 		string(job.Status),
 		job.RetryCount,
@@ -283,12 +285,13 @@ func (s *Store) FailExecution(ctx context.Context, executionID string, endedAt t
 	return checkRowsAffected(result, jobstore.ErrExecutionNotFound)
 }
 
-func (s *Store) CompleteJob(ctx context.Context, jobID string, now time.Time) (domain.Job, error) {
+func (s *Store) CompleteJob(ctx context.Context, jobID string, result []byte, now time.Time) (domain.Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		UPDATE jobs
 		SET status = $2,
 			completed_at = $3,
 			updated_at = $3,
+			result = $4::jsonb,
 			locked_by = NULL,
 			locked_at = NULL,
 			lock_expires_at = NULL
@@ -297,6 +300,7 @@ func (s *Store) CompleteJob(ctx context.Context, jobID string, now time.Time) (d
 		jobID,
 		string(domain.JobStatusCompleted),
 		now,
+		jsonValue(result),
 	)
 
 	job, err := scanJob(row)
@@ -307,6 +311,28 @@ func (s *Store) CompleteJob(ctx context.Context, jobID string, now time.Time) (d
 		return domain.Job{}, fmt.Errorf("complete job: %w", err)
 	}
 
+	return job, nil
+}
+
+func (s *Store) FailJobPermanently(ctx context.Context, jobID string, errorMessage string, now time.Time) (domain.Job, error) {
+	const query = "UPDATE jobs\n" +
+		"SET status = $2,\n" +
+		"\tlast_error = $3,\n" +
+		"\tupdated_at = $4,\n" +
+		"\tlocked_by = NULL,\n" +
+		"\tlocked_at = NULL,\n" +
+		"\tlock_expires_at = NULL\n" +
+		"WHERE id = $1\n" +
+		"RETURNING " + jobColumns
+
+	row := s.db.QueryRowContext(ctx, query, jobID, string(domain.JobStatusDeadLetter), errorMessage, now)
+	job, err := scanJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Job{}, jobstore.ErrJobNotFound
+	}
+	if err != nil {
+		return domain.Job{}, fmt.Errorf("fail job permanently: %w", err)
+	}
 	return job, nil
 }
 
@@ -366,6 +392,7 @@ const jobColumns = `
 	id,
 	type,
 	payload,
+	result,
 	priority,
 	status,
 	retry_count,
@@ -415,6 +442,7 @@ type scanner interface {
 func scanJob(row scanner) (domain.Job, error) {
 	var job domain.Job
 	var payload []byte
+	var result []byte
 	var status string
 	var lockedBy sql.NullString
 	var lockedAt sql.NullTime
@@ -426,6 +454,7 @@ func scanJob(row scanner) (domain.Job, error) {
 		&job.ID,
 		&job.Type,
 		&payload,
+		&result,
 		&job.Priority,
 		&status,
 		&job.RetryCount,
@@ -448,6 +477,7 @@ func scanJob(row scanner) (domain.Job, error) {
 	}
 
 	job.Payload = payload
+	job.Result = result
 	job.Status = parsedStatus
 	job.LockedBy = stringPtrFromNull(lockedBy)
 	job.LockedAt = timePtrFromNull(lockedAt)
@@ -550,6 +580,13 @@ func stringValue(value *string) any {
 		return nil
 	}
 	return *value
+}
+
+func jsonValue(value []byte) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return string(value)
 }
 
 func timeValue(value *time.Time) any {

@@ -177,7 +177,7 @@ func (s *MemoryStore) FailExecution(_ context.Context, executionID string, ended
 	return nil
 }
 
-func (s *MemoryStore) CompleteJob(_ context.Context, jobID string, now time.Time) (domain.Job, error) {
+func (s *MemoryStore) CompleteJob(_ context.Context, jobID string, result []byte, now time.Time) (domain.Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -187,6 +187,7 @@ func (s *MemoryStore) CompleteJob(_ context.Context, jobID string, now time.Time
 	}
 
 	job = job.Complete(now)
+	job.Result = append([]byte(nil), result...)
 	s.jobs[jobID] = job
 	return job, nil
 }
@@ -201,6 +202,25 @@ func (s *MemoryStore) FailJob(_ context.Context, jobID string, errorMessage stri
 	}
 
 	job = job.Fail(errorMessage, policy, now)
+	s.jobs[jobID] = job
+	return job, nil
+}
+
+func (s *MemoryStore) FailJobPermanently(_ context.Context, jobID string, errorMessage string, now time.Time) (domain.Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return domain.Job{}, ErrJobNotFound
+	}
+
+	job.Status = domain.JobStatusDeadLetter
+	job.LastError = &errorMessage
+	job.UpdatedAt = now
+	job.LockedBy = nil
+	job.LockedAt = nil
+	job.LockExpiresAt = nil
 	s.jobs[jobID] = job
 	return job, nil
 }

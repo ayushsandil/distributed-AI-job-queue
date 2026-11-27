@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"time"
 
+	"ai-job-queue/internal/ai"
 	"ai-job-queue/internal/domain"
 	"ai-job-queue/internal/ids"
 	"ai-job-queue/internal/postgres"
@@ -46,16 +47,19 @@ func main() {
 		InitialDelay: durationEnv("RETRY_INITIAL_DELAY", time.Second),
 		MaxDelay:     durationEnv("RETRY_MAX_DELAY", time.Minute),
 	}
+	handlers, resultHandlers := buildHandlers()
 
 	if os.Getenv("QUEUE_BACKEND") == "redis" {
-		runRedisWorker(ctx, postgres.NewStore(db), workerID, leaseDuration, retryPolicy)
+		runRedisWorker(ctx, postgres.NewStore(db), workerID, leaseDuration, retryPolicy, handlers, resultHandlers)
 		return
 	}
 
 	processor, err := worker.NewProcessor(postgres.NewStore(db), worker.Config{
-		WorkerID:      workerID,
-		LeaseDuration: leaseDuration,
-		RetryPolicy:   retryPolicy,
+		WorkerID:       workerID,
+		LeaseDuration:  leaseDuration,
+		RetryPolicy:    retryPolicy,
+		Handlers:       handlers,
+		ResultHandlers: resultHandlers,
 	})
 	if err != nil {
 		log.Fatalf("new processor: %v", err)
@@ -69,7 +73,7 @@ func main() {
 	log.Printf("postgres worker %s stopped", workerID)
 }
 
-func runRedisWorker(ctx context.Context, store *postgres.Store, workerID string, leaseDuration time.Duration, retryPolicy domain.RetryPolicy) {
+func runRedisWorker(ctx context.Context, store *postgres.Store, workerID string, leaseDuration time.Duration, retryPolicy domain.RetryPolicy, handlers map[string]worker.Handler, resultHandlers map[string]worker.ResultHandler) {
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		log.Fatal("REDIS_URL is required when QUEUE_BACKEND=redis")
@@ -82,11 +86,13 @@ func runRedisWorker(ctx context.Context, store *postgres.Store, workerID string,
 	defer stream.Close()
 
 	processor, err := worker.NewStreamProcessor(store, stream, worker.StreamConfig{
-		WorkerID:      workerID,
-		LeaseDuration: leaseDuration,
-		RetryPolicy:   retryPolicy,
-		BatchSize:     int64Env("STREAM_BATCH_SIZE", 10),
-		PollInterval:  durationEnv("POLL_INTERVAL", time.Second),
+		WorkerID:       workerID,
+		LeaseDuration:  leaseDuration,
+		RetryPolicy:    retryPolicy,
+		Handlers:       handlers,
+		ResultHandlers: resultHandlers,
+		BatchSize:      int64Env("STREAM_BATCH_SIZE", 10),
+		PollInterval:   durationEnv("POLL_INTERVAL", time.Second),
 	})
 	if err != nil {
 		log.Fatalf("new redis stream processor: %v", err)
@@ -97,6 +103,34 @@ func runRedisWorker(ctx context.Context, store *postgres.Store, workerID string,
 		log.Fatalf("redis worker stopped: %v", err)
 	}
 	log.Printf("redis worker %s stopped", workerID)
+}
+
+func buildHandlers() (map[string]worker.Handler, map[string]worker.ResultHandler) {
+	handlers := worker.BuiltInHandlers()
+	resultHandlers := make(map[string]worker.ResultHandler)
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		log.Printf("OPENAI_API_KEY not set; ai.text.generate jobs will be dead-lettered")
+		handlers["ai.text.generate"] = func(context.Context, domain.Job) error {
+			return worker.Permanent(errors.New("OPENAI_API_KEY is not configured"))
+		}
+		return handlers, resultHandlers
+	}
+
+	provider, err := ai.NewOpenAIProvider(ai.OpenAIConfig{
+		APIKey:       apiKey,
+		BaseURL:      os.Getenv("OPENAI_BASE_URL"),
+		DefaultModel: getenv("OPENAI_MODEL", "gpt-4o-mini"),
+	})
+	if err != nil {
+		log.Fatalf("configure OpenAI provider: %v", err)
+	}
+	resultHandlers["ai.text.generate"] = worker.NewAITextGenerateHandler(
+		provider,
+		durationEnv("AI_REQUEST_TIMEOUT", 2*time.Minute),
+	)
+	log.Printf("OpenAI handler enabled for ai.text.generate")
+	return handlers, resultHandlers
 }
 
 func getenv(name string, fallback string) string {

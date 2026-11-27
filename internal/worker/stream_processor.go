@@ -18,8 +18,9 @@ type StreamStore interface {
 	CreateExecution(ctx context.Context, execution domain.JobExecution) (domain.JobExecution, error)
 	CompleteExecution(ctx context.Context, executionID string, endedAt time.Time) error
 	FailExecution(ctx context.Context, executionID string, endedAt time.Time, errorMessage string) error
-	CompleteJob(ctx context.Context, jobID string, now time.Time) (domain.Job, error)
+	CompleteJob(ctx context.Context, jobID string, result []byte, now time.Time) (domain.Job, error)
 	FailJob(ctx context.Context, jobID string, errorMessage string, policy domain.RetryPolicy, now time.Time) (domain.Job, error)
+	FailJobPermanently(ctx context.Context, jobID string, errorMessage string, now time.Time) (domain.Job, error)
 }
 
 type StreamClient interface {
@@ -31,25 +32,27 @@ type StreamClient interface {
 }
 
 type StreamConfig struct {
-	WorkerID      string
-	LeaseDuration time.Duration
-	RetryPolicy   domain.RetryPolicy
-	Handlers      map[string]Handler
-	Now           func() time.Time
-	BatchSize     int64
-	PollInterval  time.Duration
+	WorkerID       string
+	LeaseDuration  time.Duration
+	RetryPolicy    domain.RetryPolicy
+	Handlers       map[string]Handler
+	ResultHandlers map[string]ResultHandler
+	Now            func() time.Time
+	BatchSize      int64
+	PollInterval   time.Duration
 }
 
 type StreamProcessor struct {
-	store         StreamStore
-	stream        StreamClient
-	workerID      string
-	leaseDuration time.Duration
-	retryPolicy   domain.RetryPolicy
-	handlers      map[string]Handler
-	now           func() time.Time
-	batchSize     int64
-	pollInterval  time.Duration
+	store          StreamStore
+	stream         StreamClient
+	workerID       string
+	leaseDuration  time.Duration
+	retryPolicy    domain.RetryPolicy
+	handlers       map[string]Handler
+	resultHandlers map[string]ResultHandler
+	now            func() time.Time
+	batchSize      int64
+	pollInterval   time.Duration
 }
 
 func NewStreamProcessor(store StreamStore, stream StreamClient, config StreamConfig) (*StreamProcessor, error) {
@@ -68,6 +71,9 @@ func NewStreamProcessor(store StreamStore, stream StreamClient, config StreamCon
 	if config.Handlers == nil {
 		config.Handlers = BuiltInHandlers()
 	}
+	if config.ResultHandlers == nil {
+		config.ResultHandlers = make(map[string]ResultHandler)
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -79,15 +85,16 @@ func NewStreamProcessor(store StreamStore, stream StreamClient, config StreamCon
 	}
 
 	return &StreamProcessor{
-		store:         store,
-		stream:        stream,
-		workerID:      config.WorkerID,
-		leaseDuration: config.LeaseDuration,
-		retryPolicy:   config.RetryPolicy,
-		handlers:      config.Handlers,
-		now:           config.Now,
-		batchSize:     config.BatchSize,
-		pollInterval:  config.PollInterval,
+		store:          store,
+		stream:         stream,
+		workerID:       config.WorkerID,
+		leaseDuration:  config.LeaseDuration,
+		retryPolicy:    config.RetryPolicy,
+		handlers:       config.Handlers,
+		resultHandlers: config.ResultHandlers,
+		now:            config.Now,
+		batchSize:      config.BatchSize,
+		pollInterval:   config.PollInterval,
 	}, nil
 }
 
@@ -159,11 +166,13 @@ func (p *StreamProcessor) processMessage(ctx context.Context, message redisqueue
 		return err
 	}
 
-	handler, ok := p.handlers[job.Type]
-	if !ok {
-		err = fmt.Errorf("no handler registered for job type %q", job.Type)
-	} else {
+	var handlerResult HandlerResult
+	if resultHandler, ok := p.resultHandlers[job.Type]; ok {
+		handlerResult, err = resultHandler(ctx, job)
+	} else if handler, ok := p.handlers[job.Type]; ok {
 		err = handler(ctx, job)
+	} else {
+		err = Permanent(fmt.Errorf("no handler registered for job type %q", job.Type))
 	}
 
 	endedAt := p.now().UTC()
@@ -172,7 +181,13 @@ func (p *StreamProcessor) processMessage(ctx context.Context, message redisqueue
 		if markErr := p.store.FailExecution(ctx, execution.ID, endedAt, errorMessage); markErr != nil {
 			return markErr
 		}
-		failedJob, failErr := p.store.FailJob(ctx, job.ID, errorMessage, p.retryPolicy, endedAt)
+		var failedJob domain.Job
+		var failErr error
+		if isPermanent(err) {
+			failedJob, failErr = p.store.FailJobPermanently(ctx, job.ID, errorMessage, endedAt)
+		} else {
+			failedJob, failErr = p.store.FailJob(ctx, job.ID, errorMessage, p.retryPolicy, endedAt)
+		}
 		if failErr != nil {
 			return failErr
 		}
@@ -191,7 +206,7 @@ func (p *StreamProcessor) processMessage(ctx context.Context, message redisqueue
 	if err := p.store.CompleteExecution(ctx, execution.ID, endedAt); err != nil {
 		return err
 	}
-	if _, err := p.store.CompleteJob(ctx, job.ID, endedAt); err != nil {
+	if _, err := p.store.CompleteJob(ctx, job.ID, handlerResult.Result, endedAt); err != nil {
 		return err
 	}
 
